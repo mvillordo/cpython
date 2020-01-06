@@ -246,7 +246,6 @@ def _setup_async_mock(mock):
     mock.await_count = 0
     mock.await_args = None
     mock.await_args_list = _CallList()
-    mock.awaited = _AwaitEvent(mock)
 
     # Mock is not configured yet so the attributes are set
     # to a function and then the corresponding mock helper function
@@ -409,7 +408,7 @@ class NonCallableMock(Base):
             if spec_arg and _is_async_obj(spec_arg):
                 bases = (AsyncMockMixin, cls)
         new = type(cls.__name__, bases, {'__doc__': cls.__doc__})
-        instance = object.__new__(new)
+        instance = _safe_super(NonCallableMock, cls).__new__(new)
         return instance
 
 
@@ -868,7 +867,7 @@ class NonCallableMock(Base):
         """
         if self.call_count == 0:
             msg = ("Expected '%s' to have been called." %
-                   self._mock_name or 'mock')
+                   (self._mock_name or 'mock'))
             raise AssertionError(msg)
 
     def assert_called_once(self):
@@ -926,13 +925,21 @@ class NonCallableMock(Base):
         If `any_order` is True then the calls can be in any order, but
         they must all appear in `mock_calls`."""
         expected = [self._call_matcher(c) for c in calls]
-        cause = expected if isinstance(expected, Exception) else None
+        cause = next((e for e in expected if isinstance(e, Exception)), None)
         all_calls = _CallList(self._call_matcher(c) for c in self.mock_calls)
         if not any_order:
             if expected not in all_calls:
+                if cause is None:
+                    problem = 'Calls not found.'
+                else:
+                    problem = ('Error processing expected calls.\n'
+                               'Errors: {}').format(
+                                   [e if isinstance(e, Exception) else None
+                                    for e in expected])
                 raise AssertionError(
-                    'Calls not found.\nExpected: %r%s'
-                    % (_CallList(calls), self._calls_repr(prefix="Actual"))
+                    f'{problem}\n'
+                    f'Expected: {_CallList(calls)}'
+                    f'{self._calls_repr(prefix="Actual").rstrip(".")}'
                 ) from cause
             return
 
@@ -982,13 +989,19 @@ class NonCallableMock(Base):
 
         _type = type(self)
         if issubclass(_type, MagicMock) and _new_name in _async_method_magics:
+            # Any asynchronous magic becomes an AsyncMock
             klass = AsyncMock
-        if issubclass(_type, AsyncMockMixin):
-            klass = MagicMock
-        if not issubclass(_type, CallableMixin):
+        elif issubclass(_type, AsyncMockMixin):
+            if (_new_name in _all_sync_magics or
+                    self._mock_methods and _new_name in self._mock_methods):
+                # Any synchronous method on AsyncMock becomes a MagicMock
+                klass = MagicMock
+            else:
+                klass = AsyncMock
+        elif not issubclass(_type, CallableMixin):
             if issubclass(_type, NonCallableMagicMock):
                 klass = MagicMock
-            elif issubclass(_type, NonCallableMock) :
+            elif issubclass(_type, NonCallableMock):
                 klass = Mock
         else:
             klass = _type.__mro__[1]
@@ -1072,14 +1085,20 @@ class CallableMixin(Base):
         # can't use self in-case a function / method we are mocking uses self
         # in the signature
         self._mock_check_sig(*args, **kwargs)
+        self._increment_mock_call(*args, **kwargs)
         return self._mock_call(*args, **kwargs)
 
 
     def _mock_call(self, /, *args, **kwargs):
+        return self._execute_mock_call(*args, **kwargs)
+
+    def _increment_mock_call(self, /, *args, **kwargs):
         self.called = True
         self.call_count += 1
 
         # handle call_args
+        # needs to be set here so assertions on call arguments pass before
+        # execution in the case of awaited calls
         _call = _Call((args, kwargs), two=True)
         self.call_args = _call
         self.call_args_list.append(_call)
@@ -1118,6 +1137,10 @@ class CallableMixin(Base):
 
             # follow the parental chain:
             _new_parent = _new_parent._mock_new_parent
+
+    def _execute_mock_call(self, /, *args, **kwargs):
+        # separate from _increment_mock_call so that awaited functions are
+        # executed separately from their call, also AsyncMock overrides this method
 
         effect = self.side_effect
         if effect is not None:
@@ -1578,6 +1601,10 @@ def _patch_object(
     When used as a class decorator `patch.object` honours `patch.TEST_PREFIX`
     for choosing which methods to wrap.
     """
+    if type(target) is str:
+        raise TypeError(
+            f"{target!r} must be the actual object to be patched, not a str"
+        )
     getter = lambda: target
     return _patch(
         getter, attribute, new, spec, create,
@@ -1864,6 +1891,7 @@ magic_methods = (
     "round trunc floor ceil "
     "bool next "
     "fspath "
+    "aiter "
 )
 
 numerics = (
@@ -1881,7 +1909,7 @@ _non_defaults = {
     '__reduce__', '__reduce_ex__', '__getinitargs__', '__getnewargs__',
     '__getstate__', '__setstate__', '__getformat__', '__setformat__',
     '__repr__', '__dir__', '__subclasses__', '__format__',
-    '__getnewargs_ex__', '__aenter__', '__aexit__', '__anext__', '__aiter__',
+    '__getnewargs_ex__',
 }
 
 
@@ -1900,10 +1928,12 @@ _magics = {
 
 # Magic methods used for async `with` statements
 _async_method_magics = {"__aenter__", "__aexit__", "__anext__"}
-# `__aiter__` is a plain function but used with async calls
-_async_magics = _async_method_magics | {"__aiter__"}
+# Magic methods that are only used with async calls but are synchronous functions themselves
+_sync_async_magics = {"__aiter__"}
+_async_magics = _async_method_magics | _sync_async_magics
 
-_all_magics = _magics | _non_defaults
+_all_sync_magics = _magics | _non_defaults
+_all_magics = _all_sync_magics | _async_magics
 
 _unsupported_magics = {
     '__getattr__', '__setattr__',
@@ -1988,9 +2018,9 @@ def _set_return_value(mock, method, name):
         method.return_value = fixed
         return
 
-    return_calulator = _calculate_return_value.get(name)
-    if return_calulator is not None:
-        return_value = return_calulator(mock)
+    return_calculator = _calculate_return_value.get(name)
+    if return_calculator is not None:
+        return_value = return_calculator(mock)
         method.return_value = return_value
         return
 
@@ -2000,7 +2030,7 @@ def _set_return_value(mock, method, name):
 
 
 
-class MagicMixin(object):
+class MagicMixin(Base):
     def __init__(self, /, *args, **kw):
         self._mock_set_magics()  # make magic work for kwargs in init
         _safe_super(MagicMixin, self).__init__(*args, **kw)
@@ -2008,13 +2038,14 @@ class MagicMixin(object):
 
 
     def _mock_set_magics(self):
-        these_magics = _magics
+        orig_magics = _magics | _async_method_magics
+        these_magics = orig_magics
 
         if getattr(self, "_mock_methods", None) is not None:
-            these_magics = _magics.intersection(self._mock_methods)
+            these_magics = orig_magics.intersection(self._mock_methods)
 
             remove_magics = set()
-            remove_magics = _magics - these_magics
+            remove_magics = orig_magics - these_magics
 
             for entry in remove_magics:
                 if entry in type(self).__dict__:
@@ -2042,33 +2073,13 @@ class NonCallableMagicMock(MagicMixin, NonCallableMock):
         self._mock_set_magics()
 
 
-class AsyncMagicMixin:
+class AsyncMagicMixin(MagicMixin):
     def __init__(self, /, *args, **kw):
-        self._mock_set_async_magics()  # make magic work for kwargs in init
+        self._mock_set_magics()  # make magic work for kwargs in init
         _safe_super(AsyncMagicMixin, self).__init__(*args, **kw)
-        self._mock_set_async_magics()  # fix magic broken by upper level init
+        self._mock_set_magics()  # fix magic broken by upper level init
 
-    def _mock_set_async_magics(self):
-        these_magics = _async_magics
-
-        if getattr(self, "_mock_methods", None) is not None:
-            these_magics = _async_magics.intersection(self._mock_methods)
-            remove_magics = _async_magics - these_magics
-
-            for entry in remove_magics:
-                if entry in type(self).__dict__:
-                    # remove unneeded magic methods
-                    delattr(self, entry)
-
-        # don't overwrite existing attributes if called a second time
-        these_magics = these_magics - set(type(self).__dict__)
-
-        _type = type(self)
-        for entry in these_magics:
-            setattr(_type, entry, MagicProxy(entry, self))
-
-
-class MagicMock(MagicMixin, AsyncMagicMixin, Mock):
+class MagicMock(MagicMixin, Mock):
     """
     MagicMock is a subclass of Mock with default implementations
     of most of the magic methods. You can use MagicMock without having to
@@ -2090,7 +2101,7 @@ class MagicMock(MagicMixin, AsyncMagicMixin, Mock):
 
 
 
-class MagicProxy(object):
+class MagicProxy(Base):
     def __init__(self, name, parent):
         self.name = name
         self.parent = parent
@@ -2109,7 +2120,6 @@ class MagicProxy(object):
 
 
 class AsyncMockMixin(Base):
-    awaited = _delegating_property('awaited')
     await_count = _delegating_property('await_count')
     await_args = _delegating_property('await_args')
     await_args_list = _delegating_property('await_args_list')
@@ -2123,7 +2133,6 @@ class AsyncMockMixin(Base):
         # It is set through __dict__ because when spec_set is True, this
         # attribute is likely undefined.
         self.__dict__['_is_coroutine'] = asyncio.coroutines._is_coroutine
-        self.__dict__['_mock_awaited'] = _AwaitEvent(self)
         self.__dict__['_mock_await_count'] = 0
         self.__dict__['_mock_await_args'] = None
         self.__dict__['_mock_await_args_list'] = _CallList()
@@ -2131,30 +2140,45 @@ class AsyncMockMixin(Base):
         code_mock.co_flags = inspect.CO_COROUTINE
         self.__dict__['__code__'] = code_mock
 
-    async def _mock_call(self, /, *args, **kwargs):
-        try:
-            result = super()._mock_call(*args, **kwargs)
-        except (BaseException, StopIteration) as e:
-            side_effect = self.side_effect
-            if side_effect is not None and not callable(side_effect):
-                raise
-            return await _raise(e)
+    async def _execute_mock_call(self, /, *args, **kwargs):
+        # This is nearly just like super(), except for sepcial handling
+        # of coroutines
 
         _call = self.call_args
+        self.await_count += 1
+        self.await_args = _call
+        self.await_args_list.append(_call)
 
-        async def proxy():
-            try:
-                if inspect.isawaitable(result):
-                    return await result
-                else:
-                    return result
-            finally:
-                self.await_count += 1
-                self.await_args = _call
-                self.await_args_list.append(_call)
-                await self.awaited._notify()
+        effect = self.side_effect
+        if effect is not None:
+            if _is_exception(effect):
+                raise effect
+            elif not _callable(effect):
+                try:
+                    result = next(effect)
+                except StopIteration:
+                    # It is impossible to propogate a StopIteration
+                    # through coroutines because of PEP 479
+                    raise StopAsyncIteration
+                if _is_exception(result):
+                    raise result
+            elif asyncio.iscoroutinefunction(effect):
+                result = await effect(*args, **kwargs)
+            else:
+                result = effect(*args, **kwargs)
 
-        return await proxy()
+            if result is not DEFAULT:
+                return result
+
+        if self._mock_return_value is not DEFAULT:
+            return self.return_value
+
+        if self._mock_wraps is not None:
+            if asyncio.iscoroutinefunction(self._mock_wraps):
+                return await self._mock_wraps(*args, **kwargs)
+            return self._mock_wraps(*args, **kwargs)
+
+        return self.return_value
 
     def assert_awaited(self):
         """
@@ -2228,12 +2252,20 @@ class AsyncMockMixin(Base):
         they must all appear in :attr:`await_args_list`.
         """
         expected = [self._call_matcher(c) for c in calls]
-        cause = expected if isinstance(expected, Exception) else None
+        cause = next((e for e in expected if isinstance(e, Exception)), None)
         all_awaits = _CallList(self._call_matcher(c) for c in self.await_args_list)
         if not any_order:
             if expected not in all_awaits:
+                if cause is None:
+                    problem = 'Awaits not found.'
+                else:
+                    problem = ('Error processing expected awaits.\n'
+                               'Errors: {}').format(
+                                   [e if isinstance(e, Exception) else None
+                                    for e in expected])
                 raise AssertionError(
-                    f'Awaits not found.\nExpected: {_CallList(calls)}\n'
+                    f'{problem}\n'
+                    f'Expected: {_CallList(calls)}\n'
                     f'Actual: {self.await_args_list}'
                 ) from cause
             return
@@ -2852,10 +2884,6 @@ def seal(mock):
             seal(m)
 
 
-async def _raise(exception):
-    raise exception
-
-
 class _AsyncIterator:
     """
     Wraps an iterator in an asynchronous iterator.
@@ -2875,35 +2903,3 @@ class _AsyncIterator:
         except StopIteration:
             pass
         raise StopAsyncIteration
-
-
-class _AwaitEvent:
-    def __init__(self, mock):
-        self._mock = mock
-        self._condition = None
-
-    async def _notify(self):
-        condition = self._get_condition()
-        try:
-            await condition.acquire()
-            condition.notify_all()
-        finally:
-            condition.release()
-
-    def _get_condition(self):
-        """
-        Creation of condition is delayed, to minimize the chance of using the
-        wrong loop.
-        A user may create a mock with _AwaitEvent before selecting the
-        execution loop.  Requiring a user to delay creation is error-prone and
-        inflexible. Instead, condition is created when user actually starts to
-        use the mock.
-        """
-        # No synchronization is needed:
-        #   - asyncio is thread unsafe
-        #   - there are no awaits here, method will be executed without
-        #   switching asyncio context.
-        if self._condition is None:
-            self._condition = asyncio.Condition()
-
-        return self._condition

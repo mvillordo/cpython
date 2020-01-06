@@ -360,7 +360,7 @@ the *new_callable* argument to :func:`patch`.
         assert the mock has been called with the specified calls.
         The :attr:`mock_calls` list is checked for the calls.
 
-        If *any_order* is false (the default) then the calls must be
+        If *any_order* is false then the calls must be
         sequential. There can be extra calls before or after the
         specified calls.
 
@@ -513,21 +513,6 @@ the *new_callable* argument to :func:`patch`.
             >>> mock()
             >>> mock.call_count
             2
-
-        For :class:`AsyncMock` the :attr:`call_count` is only iterated if the function
-        has been awaited:
-
-            >>> mock = AsyncMock()
-            >>> mock()  # doctest: +SKIP
-            <coroutine object AsyncMockMixin._mock_call at ...>
-            >>> mock.call_count
-            0
-            >>> async def main():
-            ...     await mock()
-            ...
-            >>> asyncio.run(main())
-            >>> mock.call_count
-            1
 
     .. attribute:: return_value
 
@@ -880,7 +865,7 @@ object::
     True
 
   The result of ``mock()`` is an async function which will have the outcome
-  of ``side_effect`` or ``return_value``:
+  of ``side_effect`` or ``return_value`` after it has been awaited:
 
   - if ``side_effect`` is a function, the async function will return the
     result of that function,
@@ -888,7 +873,7 @@ object::
     exception,
   - if ``side_effect`` is an iterable, the async function will return the
     next value of the iterable, however, if the sequence of result is
-    exhausted, ``StopIteration`` is raised immediately,
+    exhausted, ``StopAsyncIteration`` is raised immediately,
   - if ``side_effect`` is not defined, the async function will return the
     value defined by ``return_value``, hence, by default, the async function
     returns a new :class:`AsyncMock` object.
@@ -905,21 +890,51 @@ object::
     >>> mock()  # doctest: +SKIP
     <coroutine object AsyncMockMixin._mock_call at ...>
 
+
+  Setting the *spec* of a :class:`Mock`, :class:`MagicMock`, or :class:`AsyncMock`
+  to a class with asynchronous and synchronous functions will automatically
+  detect the synchronous functions and set them as :class:`MagicMock` (if the
+  parent mock is :class:`AsyncMock` or :class:`MagicMock`) or :class:`Mock` (if
+  the parent mock is :class:`Mock`). All asynchronous functions will be
+  :class:`AsyncMock`.
+
+  >>> class ExampleClass:
+  ...     def sync_foo():
+  ...         pass
+  ...     async def async_foo():
+  ...         pass
+  ...
+  >>> a_mock = AsyncMock(ExampleClass)
+  >>> a_mock.sync_foo
+  <MagicMock name='mock.sync_foo' id='...'>
+  >>> a_mock.async_foo
+  <AsyncMock name='mock.async_foo' id='...'>
+  >>> mock = Mock(ExampleClass)
+  >>> mock.sync_foo
+  <Mock name='mock.sync_foo' id='...'>
+  >>> mock.async_foo
+  <AsyncMock name='mock.async_foo' id='...'>
+
+  .. versionadded:: 3.8
+
   .. method:: assert_awaited()
 
-      Assert that the mock was awaited at least once.
+      Assert that the mock was awaited at least once. Note that this is separate
+      from the object having been called, the ``await`` keyword must be used:
 
           >>> mock = AsyncMock()
-          >>> async def main():
-          ...     await mock()
+          >>> async def main(coroutine_mock):
+          ...     await coroutine_mock
           ...
-          >>> asyncio.run(main())
+          >>> coroutine_mock = mock()
+          >>> mock.called
+          True
           >>> mock.assert_awaited()
-          >>> mock_2 = AsyncMock()
-          >>> mock_2.assert_awaited()
           Traceback (most recent call last):
           ...
           AssertionError: Expected mock to have been awaited.
+          >>> asyncio.run(main(coroutine_mock))
+          >>> mock.assert_awaited()
 
   .. method:: assert_awaited_once()
 
@@ -992,11 +1007,11 @@ object::
       Assert the mock has been awaited with the specified calls.
       The :attr:`await_args_list` list is checked for the awaits.
 
-      If *any_order* is False (the default) then the awaits must be
+      If *any_order* is false then the awaits must be
       sequential. There can be extra calls before or after the
       specified awaits.
 
-      If *any_order* is True then the awaits can be in any order, but
+      If *any_order* is true then the awaits can be in any order, but
       they must all appear in :attr:`await_args_list`.
 
         >>> mock = AsyncMock()
@@ -1004,14 +1019,15 @@ object::
         ...     await mock(*args, **kwargs)
         ...
         >>> calls = [call("foo"), call("bar")]
-        >>> mock.assert_has_calls(calls)
+        >>> mock.assert_has_awaits(calls)
         Traceback (most recent call last):
         ...
-        AssertionError: Calls not found.
+        AssertionError: Awaits not found.
         Expected: [call('foo'), call('bar')]
+        Actual: []
         >>> asyncio.run(main('foo'))
         >>> asyncio.run(main('bar'))
-        >>> mock.assert_has_calls(calls)
+        >>> mock.assert_has_awaits(calls)
 
   .. method:: assert_not_awaited()
 
@@ -2070,20 +2086,20 @@ to change the default.
 
 Methods and their defaults:
 
-* ``__lt__``: NotImplemented
-* ``__gt__``: NotImplemented
-* ``__le__``: NotImplemented
-* ``__ge__``: NotImplemented
-* ``__int__``: 1
-* ``__contains__``: False
-* ``__len__``: 0
-* ``__iter__``: iter([])
-* ``__exit__``: False
-* ``__aexit__``: False
-* ``__complex__``: 1j
-* ``__float__``: 1.0
-* ``__bool__``: True
-* ``__index__``: 1
+* ``__lt__``: ``NotImplemented``
+* ``__gt__``: ``NotImplemented``
+* ``__le__``: ``NotImplemented``
+* ``__ge__``: ``NotImplemented``
+* ``__int__``: ``1``
+* ``__contains__``: ``False``
+* ``__len__``: ``0``
+* ``__iter__``: ``iter([])``
+* ``__exit__``: ``False``
+* ``__aexit__``: ``False``
+* ``__complex__``: ``1j``
+* ``__float__``: ``1.0``
+* ``__bool__``: ``True``
+* ``__index__``: ``1``
 * ``__hash__``: default hash for the mock
 * ``__str__``: default str for the mock
 * ``__sizeof__``: default sizeof for the mock

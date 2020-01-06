@@ -2269,8 +2269,8 @@ class TestSignatureObject(unittest.TestCase):
         test_callable(d.dump)
 
         # static method
-        test_callable(str.maketrans)
-        test_callable('abc'.maketrans)
+        test_callable(bytes.maketrans)
+        test_callable(b'abc'.maketrans)
 
         # class method
         test_callable(dict.fromkeys)
@@ -3572,6 +3572,16 @@ class TestSignatureBind(unittest.TestCase):
 
         iterator = iter(range(5))
         self.assertEqual(self.call(setcomp_func, iterator), {0, 1, 4, 9, 16})
+
+    def test_signature_bind_posonly_kwargs(self):
+        def foo(bar, /, **kwargs):
+            return bar, kwargs.get(bar)
+
+        sig = inspect.signature(foo)
+        result = sig.bind("pos-only", bar="keyword")
+
+        self.assertEqual(result.kwargs, {"bar": "keyword"})
+        self.assertIn(("bar", "pos-only"), result.arguments.items())
 
 
 class TestBoundArguments(unittest.TestCase):

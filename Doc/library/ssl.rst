@@ -613,9 +613,9 @@ Constants
 .. data:: VERIFY_CRL_CHECK_LEAF
 
    Possible value for :attr:`SSLContext.verify_flags`. In this mode, only the
-   peer cert is check but non of the intermediate CA certificates. The mode
+   peer cert is checked but none of the intermediate CA certificates. The mode
    requires a valid CRL that is signed by the peer cert's issuer (its direct
-   ancestor CA). If no proper has been loaded
+   ancestor CA). If no proper CRL has has been loaded with
    :attr:`SSLContext.load_verify_locations`, validation will fail.
 
    .. versionadded:: 3.4
@@ -1256,6 +1256,9 @@ SSL sockets also have the following additional methods and attributes:
       The returned dictionary includes additional X509v3 extension items
         such as ``crlDistributionPoints``, ``caIssuers`` and ``OCSP`` URIs.
 
+   .. versionchanged:: 3.9
+      IPv6 address strings no longer have a trailing new line.
+
 .. method:: SSLSocket.cipher()
 
    Returns a three-value tuple containing the name of the cipher being used, the
@@ -1658,7 +1661,7 @@ to speed up repeated connections from the same clients.
    return the agreed-upon protocol.
 
    This method will raise :exc:`NotImplementedError` if :data:`HAS_ALPN` is
-   False.
+   ``False``.
 
    OpenSSL 1.1.0 to 1.1.0e will abort the handshake and raise :exc:`SSLError`
    when both sides support ALPN but cannot agree on a protocol. 1.1.0f+
@@ -1677,7 +1680,7 @@ to speed up repeated connections from the same clients.
    return the agreed-upon protocol.
 
    This method will raise :exc:`NotImplementedError` if :data:`HAS_NPN` is
-   False.
+   ``False``.
 
    .. versionadded:: 3.3
 

@@ -446,6 +446,19 @@ class CompletedProcess(object):
             args.append('stderr={!r}'.format(self.stderr))
         return "{}({})".format(type(self).__name__, ', '.join(args))
 
+    def __class_getitem__(cls, type):
+        """Provide minimal support for using this class as generic
+        (for example in type annotations).
+
+        See PEP 484 and PEP 560 for more details. For example,
+        `CompletedProcess[bytes]` is a valid expression at runtime
+        (type argument `bytes` indicates the type used for stdout).
+        Note, no type checking happens at runtime, but a static type
+        checker can be used.
+        """
+        return cls
+
+
     def check_returncode(self):
         """Raise CalledProcessError if the exit code is non-zero."""
         if self.returncode:
@@ -733,6 +746,8 @@ class Popen(object):
 
       user (POSIX only)
 
+      umask (POSIX only)
+
       pass_fds (POSIX only)
 
       encoding and errors: Text mode encoding and error handling to use for
@@ -750,7 +765,7 @@ class Popen(object):
                  startupinfo=None, creationflags=0,
                  restore_signals=True, start_new_session=False,
                  pass_fds=(), *, user=None, group=None, extra_groups=None,
-                 encoding=None, errors=None, text=None):
+                 encoding=None, errors=None, text=None, umask=-1):
         """Create new Popen instance."""
         _cleanup()
         # Held while anything is calling waitpid before returncode has been
@@ -945,7 +960,7 @@ class Popen(object):
                                 c2pread, c2pwrite,
                                 errread, errwrite,
                                 restore_signals,
-                                gid, gids, uid,
+                                gid, gids, uid, umask,
                                 start_new_session)
         except:
             # Cleanup if the child failed starting.
@@ -975,6 +990,26 @@ class Popen(object):
                         pass
 
             raise
+
+    def __repr__(self):
+        obj_repr = (
+            f"<{self.__class__.__name__}: "
+            f"returncode: {self.returncode} args: {list(self.args)!r}>"
+        )
+        if len(obj_repr) > 80:
+            obj_repr = obj_repr[:76] + "...>"
+        return obj_repr
+
+    def __class_getitem__(cls, type):
+        """Provide minimal support for using this class as generic
+        (for example in type annotations).
+
+        See PEP 484 and PEP 560 for more details. For example, `Popen[bytes]`
+        is a valid expression at runtime (type argument `bytes` indicates the
+        type used for stdout). Note, no type checking happens at runtime, but
+        a static type checker can be used.
+        """
+        return cls
 
     @property
     def universal_newlines(self):
@@ -1318,6 +1353,7 @@ class Popen(object):
                            errread, errwrite,
                            unused_restore_signals,
                            unused_gid, unused_gids, unused_uid,
+                           unused_umask,
                            unused_start_new_session):
             """Execute program (MS Windows version)"""
 
@@ -1645,7 +1681,7 @@ class Popen(object):
                            c2pread, c2pwrite,
                            errread, errwrite,
                            restore_signals,
-                           gid, gids, uid,
+                           gid, gids, uid, umask,
                            start_new_session):
             """Execute program (POSIX version)"""
 
@@ -1681,7 +1717,11 @@ class Popen(object):
                     and (p2cread == -1 or p2cread > 2)
                     and (c2pwrite == -1 or c2pwrite > 2)
                     and (errwrite == -1 or errwrite > 2)
-                    and not start_new_session):
+                    and not start_new_session
+                    and gid is None
+                    and gids is None
+                    and uid is None
+                    and umask < 0):
                 self._posix_spawn(args, executable, env, restore_signals,
                                   p2cread, p2cwrite,
                                   c2pread, c2pwrite,
@@ -1735,7 +1775,7 @@ class Popen(object):
                             errread, errwrite,
                             errpipe_read, errpipe_write,
                             restore_signals, start_new_session,
-                            gid, gids, uid,
+                            gid, gids, uid, umask,
                             preexec_fn)
                     self._child_created = True
                 finally:
